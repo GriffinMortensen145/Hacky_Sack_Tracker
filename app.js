@@ -4,38 +4,48 @@
   const MODEL_SIZE = 320;
   const MODEL_URL = "./models/best.onnx";
   const CLASS_NAME = "hackysack";
+
   const IOU_THRESHOLD = 0.45;
-  const MAX_DETECTIONS = 10;
-  const MIN_INFERENCE_INTERVAL_MS = 120;
+  const MAX_DETECTIONS = 2;
+  const MIN_INFERENCE_INTERVAL_MS = 140;
 
   const video = document.getElementById("camera");
   const display = document.getElementById("display");
-  const displayCtx = display.getContext("2d");
+  const displayContext = display.getContext("2d");
+
   const modelCanvas = document.getElementById("modelCanvas");
-  const modelCtx = modelCanvas.getContext("2d", { willReadFrequently: true });
+  const modelContext = modelCanvas.getContext("2d", {
+    willReadFrequently: true
+  });
 
   const startButton = document.getElementById("startButton");
   const resetButton = document.getElementById("resetButton");
+
   const statusText = document.getElementById("status");
   const statusDot = document.getElementById("statusDot");
   const fpsText = document.getElementById("fps");
+
   const confidenceSlider = document.getElementById("confidence");
   const confidenceValue = document.getElementById("confidenceValue");
+
   const counterText = document.getElementById("counter");
   const message = document.getElementById("message");
 
   let session = null;
   let stream = null;
+
   let running = false;
   let inferenceBusy = false;
-  let lastInferenceAt = 0;
-  let lastFpsAt = performance.now();
-  let inferenceFrames = 0;
+
+  let lastInferenceTime = 0;
+  let lastFpsTime = performance.now();
+  let inferenceFrameCount = 0;
+
   let detections = [];
 
   let touchCount = 0;
-  let history = [];
-  let lastCountAt = 0;
+  let positionHistory = [];
+  let lastTouchTime = 0;
 
   function setStatus(text, type = "") {
     statusText.textContent = text;
@@ -52,17 +62,29 @@
   }
 
   function resizeDisplay() {
-    const ratio = window.devicePixelRatio || 1;
-    display.width = Math.round(window.innerWidth * ratio);
-    display.height = Math.round(window.innerHeight * ratio);
+    const pixelRatio = window.devicePixelRatio || 1;
+
+    display.width = Math.round(window.innerWidth * pixelRatio);
+    display.height = Math.round(window.innerHeight * pixelRatio);
+
     display.style.width = `${window.innerWidth}px`;
     display.style.height = `${window.innerHeight}px`;
   }
 
-  function getCoverTransform(sourceWidth, sourceHeight, targetWidth, targetHeight) {
-    const scale = Math.max(targetWidth / sourceWidth, targetHeight / sourceHeight);
+  function getCoverTransform(
+    sourceWidth,
+    sourceHeight,
+    targetWidth,
+    targetHeight
+  ) {
+    const scale = Math.max(
+      targetWidth / sourceWidth,
+      targetHeight / sourceHeight
+    );
+
     const width = sourceWidth * scale;
     const height = sourceHeight * scale;
+
     return {
       scale,
       x: (targetWidth - width) / 2,
@@ -73,139 +95,445 @@
   }
 
   async function loadModel() {
-    if (session) return;
+    if (session) {
+      return;
+    }
 
-    setStatus("Loading model…", "busy");
+    setStatus("Checking model…", "busy");
+
+    const absoluteModelUrl = new URL(
+      MODEL_URL,
+      window.location.href
+    ).href;
+
+    let response;
+
+    try {
+      response = await fetch(absoluteModelUrl, {
+        cache: "no-store"
+      });
+    } catch (error) {
+      throw new Error(
+        "The browser could not download the model.\n\n" +
+        `Model URL: ${absoluteModelUrl}\n\n` +
+        `${error?.message || error}`
+      );
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        `Model request failed with HTTP ${response.status}.\n\n` +
+        `Model URL: ${absoluteModelUrl}\n\n` +
+        "Confirm that models/best.onnx exists in your hosted website."
+      );
+    }
+
+    const contentType =
+      response.headers.get("content-type") || "unknown";
+
+    const modelBuffer = await response.arrayBuffer();
+
+    if (modelBuffer.byteLength < 1000) {
+      throw new Error(
+        `The downloaded model is only ${modelBuffer.byteLength} bytes.\n\n` +
+        `Content type: ${contentType}\n\n` +
+        "This usually means the server returned an HTML error page instead of best.onnx."
+      );
+    }
+
+    setStatus(
+      `Loading ${(modelBuffer.byteLength / 1024 / 1024).toFixed(1)} MB model…`,
+      "busy"
+    );
 
     ort.env.wasm.numThreads = 1;
     ort.env.wasm.simd = true;
+
     ort.env.wasm.wasmPaths =
       "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/";
 
-    session = await ort.InferenceSession.create(MODEL_URL, {
-      executionProviders: ["wasm"],
-      graphOptimizationLevel: "all"
-    });
+    try {
+      session = await ort.InferenceSession.create(
+        modelBuffer,
+        {
+          executionProviders: ["wasm"],
+          graphOptimizationLevel: "all"
+        }
+      );
+    } catch (error) {
+      throw new Error(
+        "ONNX Runtime could not open the model.\n\n" +
+        `${error?.message || error}\n\n` +
+        "Re-export the model with imgsz=320, dynamic=False, simplify=True, and opset=12."
+      );
+    }
 
+    console.log("Model URL:", absoluteModelUrl);
+    console.log("Model size:", modelBuffer.byteLength);
     console.log("Input names:", session.inputNames);
     console.log("Output names:", session.outputNames);
+
     setStatus("Model ready", "ready");
+  }
+
+  async function waitForVideoMetadata() {
+    if (video.readyState >= 1 && video.videoWidth > 0) {
+      return;
+    }
+
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(
+          new Error(
+            "The camera opened, but no video frames became available."
+          )
+        );
+      }, 10000);
+
+      video.onloadedmetadata = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+
+      video.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error("The video element reported an error."));
+      };
+    });
   }
 
   async function startCamera() {
     hideMessage();
+
     startButton.disabled = true;
+    startButton.textContent = "Starting…";
 
     try {
       await loadModel();
+    } catch (error) {
+      console.error("MODEL ERROR:", error);
+
+      setStatus("Model failed", "error");
+
+      startButton.disabled = false;
+      startButton.textContent = "Try again";
+
+      showMessage(
+        "MODEL ERROR\n\n" +
+        (error?.message || String(error))
+      );
+
+      return;
+    }
+
+    if (
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+      setStatus("Camera unsupported", "error");
+
+      startButton.disabled = false;
+      startButton.textContent = "Try again";
+
+      showMessage(
+        "CAMERA ERROR\n\n" +
+        "Camera access is unavailable.\n\n" +
+        "Open the website directly in Safari and make sure the address begins with https://"
+      );
+
+      return;
+    }
+
+    try {
+      setStatus("Requesting camera…", "busy");
 
       stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
+
         video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
+          facingMode: {
+            ideal: "environment"
+          },
+
+          width: {
+            ideal: 640
+          },
+
+          height: {
+            ideal: 480
+          },
+
+          frameRate: {
+            ideal: 30,
+            max: 30
+          }
         }
       });
 
       video.srcObject = stream;
+
+      await waitForVideoMetadata();
       await video.play();
 
       running = true;
+      inferenceBusy = false;
+      lastInferenceTime = 0;
+      lastFpsTime = performance.now();
+      inferenceFrameCount = 0;
+
       startButton.textContent = "Camera running";
       setStatus("Detecting", "ready");
+
       requestAnimationFrame(renderLoop);
     } catch (error) {
-      console.error(error);
-      setStatus("Could not start", "error");
+      console.error("CAMERA ERROR:", error);
+
+      setStatus("Camera failed", "error");
+
       startButton.disabled = false;
       startButton.textContent = "Try again";
 
-      const detail = error && error.message ? error.message : String(error);
+      let explanation = "";
+
+      if (error?.name === "NotAllowedError") {
+        explanation =
+          "\n\nCamera permission was denied. In Safari, open Website Settings and set Camera to Allow.";
+      } else if (error?.name === "NotFoundError") {
+        explanation =
+          "\n\nSafari could not find an available camera.";
+      } else if (error?.name === "NotReadableError") {
+        explanation =
+          "\n\nAnother app may be using the camera.";
+      } else if (error?.name === "OverconstrainedError") {
+        explanation =
+          "\n\nThe requested camera settings were not supported.";
+      }
+
       showMessage(
-        "Camera or model failed to start.\n\n" +
-        "Open the site directly in Safari, use HTTPS, allow camera access, " +
-        "and confirm models/best.onnx exists.\n\n" + detail
+        "CAMERA ERROR\n\n" +
+        `${error?.name || "Error"}: ` +
+        `${error?.message || String(error)}` +
+        explanation
       );
     }
   }
 
   function stopCamera() {
     running = false;
+
     if (stream) {
-      for (const track of stream.getTracks()) track.stop();
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+
       stream = null;
     }
+
+    video.srcObject = null;
   }
 
   function drawVideoAndBoxes() {
-    const w = display.width;
-    const h = display.height;
+    const canvasWidth = display.width;
+    const canvasHeight = display.height;
 
-    displayCtx.clearRect(0, 0, w, h);
+    displayContext.clearRect(
+      0,
+      0,
+      canvasWidth,
+      canvasHeight
+    );
 
-    if (!video.videoWidth || !video.videoHeight) return;
+    if (!video.videoWidth || !video.videoHeight) {
+      return;
+    }
 
-    const cover = getCoverTransform(video.videoWidth, video.videoHeight, w, h);
-    displayCtx.drawImage(video, cover.x, cover.y, cover.width, cover.height);
+    const cover = getCoverTransform(
+      video.videoWidth,
+      video.videoHeight,
+      canvasWidth,
+      canvasHeight
+    );
 
-    displayCtx.lineWidth = Math.max(3, w / 250);
-    displayCtx.font = `bold ${Math.max(18, w / 32)}px -apple-system, sans-serif`;
-    displayCtx.textBaseline = "top";
+    displayContext.drawImage(
+      video,
+      cover.x,
+      cover.y,
+      cover.width,
+      cover.height
+    );
 
-    for (const det of detections) {
-      const x = det.x1 * cover.scale + cover.x;
-      const y = det.y1 * cover.scale + cover.y;
-      const boxW = (det.x2 - det.x1) * cover.scale;
-      const boxH = (det.y2 - det.y1) * cover.scale;
+    displayContext.lineWidth = Math.max(
+      3,
+      canvasWidth / 250
+    );
 
-      displayCtx.strokeStyle = "#34d399";
-      displayCtx.fillStyle = "rgba(52, 211, 153, 0.16)";
-      displayCtx.fillRect(x, y, boxW, boxH);
-      displayCtx.strokeRect(x, y, boxW, boxH);
+    displayContext.font =
+      `bold ${Math.max(
+        18,
+        canvasWidth / 32
+      )}px -apple-system, sans-serif`;
 
-      const label = `${CLASS_NAME} ${(det.score * 100).toFixed(0)}%`;
-      const metrics = displayCtx.measureText(label);
-      const labelHeight = Math.max(26, w / 24);
+    displayContext.textBaseline = "top";
 
-      displayCtx.fillStyle = "#34d399";
-      displayCtx.fillRect(x, Math.max(0, y - labelHeight), metrics.width + 12, labelHeight);
-      displayCtx.fillStyle = "#04120d";
-      displayCtx.fillText(label, x + 6, Math.max(0, y - labelHeight + 3));
+    for (const detection of detections) {
+      const x =
+        detection.x1 * cover.scale + cover.x;
+
+      const y =
+        detection.y1 * cover.scale + cover.y;
+
+      const width =
+        (detection.x2 - detection.x1) *
+        cover.scale;
+
+      const height =
+        (detection.y2 - detection.y1) *
+        cover.scale;
+
+      displayContext.strokeStyle = "#34d399";
+      displayContext.fillStyle =
+        "rgba(52, 211, 153, 0.16)";
+
+      displayContext.fillRect(
+        x,
+        y,
+        width,
+        height
+      );
+
+      displayContext.strokeRect(
+        x,
+        y,
+        width,
+        height
+      );
+
+      const label =
+        `${CLASS_NAME} ` +
+        `${(detection.score * 100).toFixed(0)}%`;
+
+      const measurement =
+        displayContext.measureText(label);
+
+      const labelHeight = Math.max(
+        26,
+        canvasWidth / 24
+      );
+
+      displayContext.fillStyle = "#34d399";
+
+      displayContext.fillRect(
+        x,
+        Math.max(0, y - labelHeight),
+        measurement.width + 12,
+        labelHeight
+      );
+
+      displayContext.fillStyle = "#04120d";
+
+      displayContext.fillText(
+        label,
+        x + 6,
+        Math.max(
+          0,
+          y - labelHeight + 3
+        )
+      );
     }
   }
 
   function createInputTensor() {
-    const sourceW = video.videoWidth;
-    const sourceH = video.videoHeight;
-    const scale = Math.min(MODEL_SIZE / sourceW, MODEL_SIZE / sourceH);
-    const drawW = Math.round(sourceW * scale);
-    const drawH = Math.round(sourceH * scale);
-    const padX = Math.floor((MODEL_SIZE - drawW) / 2);
-    const padY = Math.floor((MODEL_SIZE - drawH) / 2);
+    const sourceWidth = video.videoWidth;
+    const sourceHeight = video.videoHeight;
 
-    modelCtx.fillStyle = "rgb(114,114,114)";
-    modelCtx.fillRect(0, 0, MODEL_SIZE, MODEL_SIZE);
-    modelCtx.drawImage(video, 0, 0, sourceW, sourceH, padX, padY, drawW, drawH);
+    const scale = Math.min(
+      MODEL_SIZE / sourceWidth,
+      MODEL_SIZE / sourceHeight
+    );
 
-    const pixels = modelCtx.getImageData(0, 0, MODEL_SIZE, MODEL_SIZE).data;
-    const area = MODEL_SIZE * MODEL_SIZE;
-    const input = new Float32Array(3 * area);
+    const resizedWidth =
+      Math.round(sourceWidth * scale);
 
-    for (let i = 0; i < area; i++) {
-      const p = i * 4;
-      input[i] = pixels[p] / 255;
-      input[area + i] = pixels[p + 1] / 255;
-      input[2 * area + i] = pixels[p + 2] / 255;
+    const resizedHeight =
+      Math.round(sourceHeight * scale);
+
+    const paddingX =
+      Math.floor(
+        (MODEL_SIZE - resizedWidth) / 2
+      );
+
+    const paddingY =
+      Math.floor(
+        (MODEL_SIZE - resizedHeight) / 2
+      );
+
+    modelContext.fillStyle =
+      "rgb(114, 114, 114)";
+
+    modelContext.fillRect(
+      0,
+      0,
+      MODEL_SIZE,
+      MODEL_SIZE
+    );
+
+    modelContext.drawImage(
+      video,
+      0,
+      0,
+      sourceWidth,
+      sourceHeight,
+      paddingX,
+      paddingY,
+      resizedWidth,
+      resizedHeight
+    );
+
+    const pixels =
+      modelContext.getImageData(
+        0,
+        0,
+        MODEL_SIZE,
+        MODEL_SIZE
+      ).data;
+
+    const imageArea =
+      MODEL_SIZE * MODEL_SIZE;
+
+    const input =
+      new Float32Array(
+        3 * imageArea
+      );
+
+    for (
+      let index = 0;
+      index < imageArea;
+      index++
+    ) {
+      const pixelIndex = index * 4;
+
+      input[index] =
+        pixels[pixelIndex] / 255;
+
+      input[imageArea + index] =
+        pixels[pixelIndex + 1] / 255;
+
+      input[2 * imageArea + index] =
+        pixels[pixelIndex + 2] / 255;
     }
 
     return {
-      tensor: new ort.Tensor("float32", input, [1, 3, MODEL_SIZE, MODEL_SIZE]),
+      tensor: new ort.Tensor(
+        "float32",
+        input,
+        [1, 3, MODEL_SIZE, MODEL_SIZE]
+      ),
+
       scale,
-      padX,
-      padY,
-      sourceW,
-      sourceH
+      paddingX,
+      paddingY,
+      sourceWidth,
+      sourceHeight
     };
   }
 
@@ -213,203 +541,522 @@
     return 1 / (1 + Math.exp(-value));
   }
 
-  function normalizedScore(value) {
-    return value >= 0 && value <= 1 ? value : sigmoid(value);
+  function normalizeScore(value) {
+    if (value >= 0 && value <= 1) {
+      return value;
+    }
+
+    return sigmoid(value);
   }
 
-  function decodeOutput(output, prep, threshold) {
-    const dims = output.dims;
-    const data = output.data;
+  function decodeOutput(
+    output,
+    preprocessing,
+    confidenceThreshold
+  ) {
+    const dimensions = output.dims;
+    const outputData = output.data;
 
-    if (dims.length !== 3 || dims[0] !== 1) {
-      throw new Error(`Unexpected ONNX output shape: [${dims.join(", ")}]`);
+    if (
+      dimensions.length !== 3 ||
+      dimensions[0] !== 1
+    ) {
+      throw new Error(
+        "Unexpected ONNX output shape: " +
+        `[${dimensions.join(", ")}]`
+      );
     }
 
     let featureCount;
     let candidateCount;
-    let featureFirst;
+    let featuresFirst;
 
-    if (dims[1] <= dims[2]) {
-      featureCount = dims[1];
-      candidateCount = dims[2];
-      featureFirst = true;
+    if (dimensions[1] <= dimensions[2]) {
+      featureCount = dimensions[1];
+      candidateCount = dimensions[2];
+      featuresFirst = true;
     } else {
-      candidateCount = dims[1];
-      featureCount = dims[2];
-      featureFirst = false;
+      candidateCount = dimensions[1];
+      featureCount = dimensions[2];
+      featuresFirst = false;
     }
 
     if (featureCount < 5) {
-      throw new Error(`Output has only ${featureCount} features per box.`);
+      throw new Error(
+        `Output only has ${featureCount} features per box.`
+      );
     }
 
-    const at = (candidate, feature) =>
-      featureFirst
-        ? data[feature * candidateCount + candidate]
-        : data[candidate * featureCount + feature];
+    function getValue(candidate, feature) {
+      if (featuresFirst) {
+        return outputData[
+          feature * candidateCount +
+          candidate
+        ];
+      }
+
+      return outputData[
+        candidate * featureCount +
+        feature
+      ];
+    }
 
     const boxes = [];
 
-    for (let i = 0; i < candidateCount; i++) {
-      const cx = at(i, 0);
-      const cy = at(i, 1);
-      const bw = at(i, 2);
-      const bh = at(i, 3);
+    for (
+      let candidate = 0;
+      candidate < candidateCount;
+      candidate++
+    ) {
+      const centerX =
+        getValue(candidate, 0);
+
+      const centerY =
+        getValue(candidate, 1);
+
+      const boxWidth =
+        getValue(candidate, 2);
+
+      const boxHeight =
+        getValue(candidate, 3);
 
       let bestScore = 0;
       let bestClass = 0;
 
-      for (let c = 4; c < featureCount; c++) {
-        const score = normalizedScore(at(i, c));
+      for (
+        let feature = 4;
+        feature < featureCount;
+        feature++
+      ) {
+        const score =
+          normalizeScore(
+            getValue(candidate, feature)
+          );
+
         if (score > bestScore) {
           bestScore = score;
-          bestClass = c - 4;
+          bestClass = feature - 4;
         }
       }
 
-      if (bestScore < threshold || bestClass !== 0) continue;
+      if (
+        bestScore < confidenceThreshold ||
+        bestClass !== 0
+      ) {
+        continue;
+      }
 
-      let x1 = (cx - bw / 2 - prep.padX) / prep.scale;
-      let y1 = (cy - bh / 2 - prep.padY) / prep.scale;
-      let x2 = (cx + bw / 2 - prep.padX) / prep.scale;
-      let y2 = (cy + bh / 2 - prep.padY) / prep.scale;
+      let x1 =
+        (
+          centerX -
+          boxWidth / 2 -
+          preprocessing.paddingX
+        ) / preprocessing.scale;
 
-      x1 = Math.max(0, Math.min(prep.sourceW, x1));
-      y1 = Math.max(0, Math.min(prep.sourceH, y1));
-      x2 = Math.max(0, Math.min(prep.sourceW, x2));
-      y2 = Math.max(0, Math.min(prep.sourceH, y2));
+      let y1 =
+        (
+          centerY -
+          boxHeight / 2 -
+          preprocessing.paddingY
+        ) / preprocessing.scale;
 
-      if (x2 <= x1 || y2 <= y1) continue;
-      boxes.push({ x1, y1, x2, y2, score: bestScore });
+      let x2 =
+        (
+          centerX +
+          boxWidth / 2 -
+          preprocessing.paddingX
+        ) / preprocessing.scale;
+
+      let y2 =
+        (
+          centerY +
+          boxHeight / 2 -
+          preprocessing.paddingY
+        ) / preprocessing.scale;
+
+      x1 = Math.max(
+        0,
+        Math.min(
+          preprocessing.sourceWidth,
+          x1
+        )
+      );
+
+      y1 = Math.max(
+        0,
+        Math.min(
+          preprocessing.sourceHeight,
+          y1
+        )
+      );
+
+      x2 = Math.max(
+        0,
+        Math.min(
+          preprocessing.sourceWidth,
+          x2
+        )
+      );
+
+      y2 = Math.max(
+        0,
+        Math.min(
+          preprocessing.sourceHeight,
+          y2
+        )
+      );
+
+      if (x2 <= x1 || y2 <= y1) {
+        continue;
+      }
+
+      boxes.push({
+        x1,
+        y1,
+        x2,
+        y2,
+        score: bestScore
+      });
     }
 
-    return nonMaximumSuppression(boxes, IOU_THRESHOLD, MAX_DETECTIONS);
+    return nonMaximumSuppression(
+      boxes,
+      IOU_THRESHOLD,
+      MAX_DETECTIONS
+    );
   }
 
-  function intersectionOverUnion(a, b) {
-    const x1 = Math.max(a.x1, b.x1);
-    const y1 = Math.max(a.y1, b.y1);
-    const x2 = Math.min(a.x2, b.x2);
-    const y2 = Math.min(a.y2, b.y2);
+  function intersectionOverUnion(
+    first,
+    second
+  ) {
+    const intersectionX1 =
+      Math.max(first.x1, second.x1);
 
-    const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
-    const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
-    const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
-    return intersection / Math.max(1e-6, areaA + areaB - intersection);
+    const intersectionY1 =
+      Math.max(first.y1, second.y1);
+
+    const intersectionX2 =
+      Math.min(first.x2, second.x2);
+
+    const intersectionY2 =
+      Math.min(first.y2, second.y2);
+
+    const intersection =
+      Math.max(
+        0,
+        intersectionX2 - intersectionX1
+      ) *
+      Math.max(
+        0,
+        intersectionY2 - intersectionY1
+      );
+
+    const firstArea =
+      (first.x2 - first.x1) *
+      (first.y2 - first.y1);
+
+    const secondArea =
+      (second.x2 - second.x1) *
+      (second.y2 - second.y1);
+
+    return (
+      intersection /
+      Math.max(
+        0.000001,
+        firstArea +
+        secondArea -
+        intersection
+      )
+    );
   }
 
-  function nonMaximumSuppression(boxes, threshold, limit) {
-    boxes.sort((a, b) => b.score - a.score);
+  function nonMaximumSuppression(
+    boxes,
+    threshold,
+    limit
+  ) {
+    boxes.sort(
+      (first, second) =>
+        second.score - first.score
+    );
+
     const kept = [];
 
-    while (boxes.length && kept.length < limit) {
+    while (
+      boxes.length > 0 &&
+      kept.length < limit
+    ) {
       const best = boxes.shift();
+
       kept.push(best);
-      boxes = boxes.filter(box => intersectionOverUnion(best, box) < threshold);
+
+      boxes = boxes.filter(
+        box =>
+          intersectionOverUnion(
+            best,
+            box
+          ) < threshold
+      );
     }
 
     return kept;
   }
 
-  function updateTouchEstimate(currentDetections, now) {
+  function updateTouchEstimate(
+    currentDetections,
+    currentTime
+  ) {
     if (!currentDetections.length) {
-      if (history.length && now - history[history.length - 1].time > 500) {
-        history = [];
+      if (
+        positionHistory.length > 0 &&
+        currentTime -
+        positionHistory[
+          positionHistory.length - 1
+        ].time >
+        500
+      ) {
+        positionHistory = [];
       }
+
       return;
     }
 
-    const best = currentDetections[0];
-    const centerY = (best.y1 + best.y2) / 2;
-    history.push({ y: centerY, time: now });
+    const bestDetection =
+      currentDetections[0];
 
-    while (history.length > 8) history.shift();
-    if (history.length < 5 || now - lastCountAt < 350) return;
+    const centerY =
+      (
+        bestDetection.y1 +
+        bestDetection.y2
+      ) / 2;
 
-    const velocities = [];
-    for (let i = 1; i < history.length; i++) {
-      const dt = Math.max(1, history[i].time - history[i - 1].time);
-      velocities.push((history[i].y - history[i - 1].y) / dt);
+    positionHistory.push({
+      y: centerY,
+      time: currentTime
+    });
+
+    while (
+      positionHistory.length > 8
+    ) {
+      positionHistory.shift();
     }
 
-    const split = Math.floor(velocities.length / 2);
-    const before = velocities.slice(0, split);
-    const after = velocities.slice(split);
-    const beforeAvg = before.reduce((a, b) => a + b, 0) / before.length;
-    const afterAvg = after.reduce((a, b) => a + b, 0) / after.length;
+    if (
+      positionHistory.length < 5 ||
+      currentTime - lastTouchTime < 350
+    ) {
+      return;
+    }
 
-    if (beforeAvg > 0.08 && afterAvg < -0.08) {
+    const velocities = [];
+
+    for (
+      let index = 1;
+      index < positionHistory.length;
+      index++
+    ) {
+      const timeDifference =
+        Math.max(
+          1,
+          positionHistory[index].time -
+          positionHistory[index - 1].time
+        );
+
+      velocities.push(
+        (
+          positionHistory[index].y -
+          positionHistory[index - 1].y
+        ) / timeDifference
+      );
+    }
+
+    const splitIndex =
+      Math.floor(
+        velocities.length / 2
+      );
+
+    const before =
+      velocities.slice(0, splitIndex);
+
+    const after =
+      velocities.slice(splitIndex);
+
+    const beforeAverage =
+      before.reduce(
+        (total, value) =>
+          total + value,
+        0
+      ) / before.length;
+
+    const afterAverage =
+      after.reduce(
+        (total, value) =>
+          total + value,
+        0
+      ) / after.length;
+
+    if (
+      beforeAverage > 0.08 &&
+      afterAverage < -0.08
+    ) {
       touchCount++;
-      counterText.textContent = String(touchCount);
-      lastCountAt = now;
-      history = history.slice(-2);
+
+      counterText.textContent =
+        String(touchCount);
+
+      lastTouchTime = currentTime;
+
+      positionHistory =
+        positionHistory.slice(-2);
     }
   }
 
-  async function runInference(now) {
-    if (!session || inferenceBusy || !video.videoWidth) return;
-    if (now - lastInferenceAt < MIN_INFERENCE_INTERVAL_MS) return;
+  async function runInference(currentTime) {
+    if (
+      !session ||
+      inferenceBusy ||
+      !video.videoWidth
+    ) {
+      return;
+    }
+
+    if (
+      currentTime -
+      lastInferenceTime <
+      MIN_INFERENCE_INTERVAL_MS
+    ) {
+      return;
+    }
 
     inferenceBusy = true;
-    lastInferenceAt = now;
+    lastInferenceTime = currentTime;
 
     try {
-      const prep = createInputTensor();
-      const inputName = session.inputNames[0];
-      const results = await session.run({ [inputName]: prep.tensor });
-      const output = results[session.outputNames[0]];
-      const threshold = Number(confidenceSlider.value) / 100;
+      const preprocessing =
+        createInputTensor();
 
-      detections = decodeOutput(output, prep, threshold);
-      updateTouchEstimate(detections, now);
+      const inputName =
+        session.inputNames[0];
 
-      inferenceFrames++;
-      if (now - lastFpsAt >= 1000) {
-        const fps = inferenceFrames * 1000 / (now - lastFpsAt);
-        fpsText.textContent = `${fps.toFixed(1)} FPS`;
-        inferenceFrames = 0;
-        lastFpsAt = now;
+      const results =
+        await session.run({
+          [inputName]:
+            preprocessing.tensor
+        });
+
+      const output =
+        results[
+          session.outputNames[0]
+        ];
+
+      const confidenceThreshold =
+        Number(
+          confidenceSlider.value
+        ) / 100;
+
+      detections =
+        decodeOutput(
+          output,
+          preprocessing,
+          confidenceThreshold
+        );
+
+      updateTouchEstimate(
+        detections,
+        currentTime
+      );
+
+      inferenceFrameCount++;
+
+      if (
+        currentTime -
+        lastFpsTime >=
+        1000
+      ) {
+        const framesPerSecond =
+          inferenceFrameCount *
+          1000 /
+          (
+            currentTime -
+            lastFpsTime
+          );
+
+        fpsText.textContent =
+          `${framesPerSecond.toFixed(1)} FPS`;
+
+        inferenceFrameCount = 0;
+        lastFpsTime = currentTime;
       }
     } catch (error) {
-      console.error(error);
-      setStatus("Inference error", "error");
-      showMessage(
-        "The model loaded, but its input or output format was unexpected.\n\n" +
-        (error && error.message ? error.message : String(error))
+      console.error("INFERENCE ERROR:", error);
+
+      setStatus(
+        "Inference failed",
+        "error"
       );
+
+      showMessage(
+        "INFERENCE ERROR\n\n" +
+        (
+          error?.message ||
+          String(error)
+        )
+      );
+
       stopCamera();
+
+      startButton.disabled = false;
+      startButton.textContent = "Try again";
     } finally {
       inferenceBusy = false;
     }
   }
 
-  function renderLoop(now) {
-    if (!running) return;
+  function renderLoop(currentTime) {
+    if (!running) {
+      return;
+    }
+
     drawVideoAndBoxes();
-    runInference(now);
+    runInference(currentTime);
+
     requestAnimationFrame(renderLoop);
   }
 
-  confidenceSlider.addEventListener("input", () => {
-    confidenceValue.textContent = `${confidenceSlider.value}%`;
-  });
+  confidenceSlider.addEventListener(
+    "input",
+    () => {
+      confidenceValue.textContent =
+        `${confidenceSlider.value}%`;
+    }
+  );
 
-  resetButton.addEventListener("click", () => {
-    touchCount = 0;
-    history = [];
-    lastCountAt = 0;
-    counterText.textContent = "0";
-  });
+  resetButton.addEventListener(
+    "click",
+    () => {
+      touchCount = 0;
+      positionHistory = [];
+      lastTouchTime = 0;
 
-  startButton.addEventListener("click", startCamera);
-  window.addEventListener("resize", resizeDisplay);
-  window.addEventListener("pagehide", stopCamera);
+      counterText.textContent = "0";
+    }
+  );
+
+  startButton.addEventListener(
+    "click",
+    startCamera
+  );
+
+  window.addEventListener(
+    "resize",
+    resizeDisplay
+  );
+
+  window.addEventListener(
+    "pagehide",
+    stopCamera
+  );
 
   resizeDisplay();
-
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    setStatus("Camera unsupported", "error");
-    showMessage("Open the HTTPS site directly in Safari.");
-    startButton.disabled = true;
-  }
 })();
