@@ -3,9 +3,7 @@
 
   // Must match the size used when exporting best.onnx.
   const MODEL_SIZE = 256;
-
-  // Rename the model so Safari cannot reuse the old cached model.
-  const MODEL_URL = "./models/hackysack_256.onnx?v=40";
+  const MODEL_URL = "./models/hackysack_256.onnx?v=41";
 
   const CLASS_NAME = "hackysack";
 
@@ -134,40 +132,38 @@
 
     if (typeof ort === "undefined") {
       throw new Error(
-        "ONNX Runtime did not load.\n\n" +
-        "Check the ONNX Runtime script tag in index.html."
+        "ONNX Runtime did not load. Check the script tag in index.html."
       );
     }
 
-    setStatus("Checking model…", "busy");
+    setStatus("Loading model with WebGL…", "busy");
 
     const modelUrl = new URL(
       MODEL_URL,
       window.location.href
     ).href;
 
-    console.log("Website version: 40");
     console.log("Model URL:", modelUrl);
-    console.log("Requested execution provider: WebGL");
+    console.log("Provider: WebGL");
+    console.log("Packed textures: disabled");
 
-    await verifyModelFile(modelUrl);
-
-    setStatus("Loading model with WebGL…", "busy");
+    /*
+    * Important fix:
+    * YOLO contains Resize operations using nearest-neighbor mode.
+    * ONNX Runtime WebGL's packed Resize implementation does not
+    * support this mode, so packed texture mode must be disabled.
+    */
+    ort.env.webgl.pack = false;
+    ort.env.webgl.contextId = "webgl2";
+    ort.env.webgl.textureCacheMode = "initializerOnly";
 
     try {
       session = await ort.InferenceSession.create(
         modelUrl,
         {
-          // Do not add "wasm" as a fallback.
           executionProviders: ["webgl"],
-
-          // Sequential execution uses less memory.
           executionMode: "sequential",
-
-          // Basic optimization reduces startup memory usage.
           graphOptimizationLevel: "basic",
-
-          // Reduce memory retained by the runtime.
           enableCpuMemArena: false,
           enableMemPattern: false
         }
@@ -178,18 +174,18 @@
       console.error("WEBGL MODEL ERROR:", error);
 
       throw new Error(
-        "WebGL could not open the ONNX model.\n\n" +
-        `${error?.message || String(error)}\n\n` +
-        "Make sure index.html loads the WebGL-capable " +
-        "ONNX Runtime file and that the model was exported at 256×256."
+        "WebGL could not open the model.\n\n" +
+        (error?.message || String(error)) +
+        "\n\nModel URL:\n" +
+        modelUrl
       );
     }
 
     console.log("Model loaded successfully.");
-    console.log("Input names:", session.inputNames);
-    console.log("Output names:", session.outputNames);
+    console.log("Inputs:", session.inputNames);
+    console.log("Outputs:", session.outputNames);
 
-    setStatus("Model ready — WebGL", "ready");
+    setStatus("Model ready — WebGL unpacked", "ready");
   }
 
   // --------------------------------------------------
