@@ -99,54 +99,18 @@
       return;
     }
 
-    setStatus("Checking model…", "busy");
+    setStatus("Loading model…", "busy");
 
     const absoluteModelUrl = new URL(
       MODEL_URL,
       window.location.href
     ).href;
 
-    let response;
+    console.log("Loading model from:", absoluteModelUrl);
 
-    try {
-      response = await fetch(absoluteModelUrl, {
-        cache: "no-store"
-      });
-    } catch (error) {
-      throw new Error(
-        "The browser could not download the model.\n\n" +
-        `Model URL: ${absoluteModelUrl}\n\n` +
-        `${error?.message || error}`
-      );
-    }
-
-    if (!response.ok) {
-      throw new Error(
-        `Model request failed with HTTP ${response.status}.\n\n` +
-        `Model URL: ${absoluteModelUrl}\n\n` +
-        "Confirm that models/best.onnx exists in your hosted website."
-      );
-    }
-
-    const contentType =
-      response.headers.get("content-type") || "unknown";
-
-    const modelBuffer = await response.arrayBuffer();
-
-    if (modelBuffer.byteLength < 1000) {
-      throw new Error(
-        `The downloaded model is only ${modelBuffer.byteLength} bytes.\n\n` +
-        `Content type: ${contentType}\n\n` +
-        "This usually means the server returned an HTML error page instead of best.onnx."
-      );
-    }
-
-    setStatus(
-      `Loading ${(modelBuffer.byteLength / 1024 / 1024).toFixed(1)} MB model…`,
-      "busy"
-    );
-
+    // Settings chosen for an older, memory-limited iPhone.
     ort.env.wasm.numThreads = 1;
+    ort.env.wasm.proxy = false;
     ort.env.wasm.simd = true;
 
     ort.env.wasm.wasmPaths =
@@ -154,22 +118,28 @@
 
     try {
       session = await ort.InferenceSession.create(
-        modelBuffer,
+        absoluteModelUrl,
         {
           executionProviders: ["wasm"],
-          graphOptimizationLevel: "all"
+
+          // Disable heavier startup optimizations to reduce peak memory.
+          graphOptimizationLevel: "basic",
+
+          executionMode: "sequential",
+          enableCpuMemArena: false,
+          enableMemPattern: false
         }
       );
     } catch (error) {
+      console.error("WASM model load failed:", error);
+
       throw new Error(
-        "ONNX Runtime could not open the model.\n\n" +
-        `${error?.message || error}\n\n` +
-        "Re-export the model with imgsz=320, dynamic=False, simplify=True, and opset=12."
+        "The iPhone ran out of memory while opening the ONNX model.\n\n" +
+        `${error?.message || String(error)}\n\n` +
+        "Try the smaller 256×256 model described below."
       );
     }
 
-    console.log("Model URL:", absoluteModelUrl);
-    console.log("Model size:", modelBuffer.byteLength);
     console.log("Input names:", session.inputNames);
     console.log("Output names:", session.outputNames);
 
