@@ -3,7 +3,7 @@
 
   // Must match the size used when exporting best.onnx.
   const MODEL_SIZE = 256;
-  const MODEL_URL = "./models/hackysack_256.onnx?v=41";
+  const MODEL_URL = "./models/hackysack_256.onnx?v=42";
 
   const CLASS_NAME = "hackysack";
 
