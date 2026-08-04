@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const MODEL_SIZE = 320;
+  const MODEL_SIZE = 256;
   const MODEL_URL = "./models/best.onnx";
   const CLASS_NAME = "hackysack";
 
