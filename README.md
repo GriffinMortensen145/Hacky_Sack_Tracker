@@ -1,25 +1,24 @@
-# Hacky Sack Safari Detector
+# Hacky Sack Website
 
-## 1. Export the trained model
+This folder contains only the website files.
 
-Change `train-4` in `export.py` to your actual run folder, then run:
+## Add your model
 
-```bash
-python export.py
-```
-
-## 2. Add the model
-
-Copy the exported ONNX file into:
+Put your exported ONNX model here:
 
 ```text
-hackysack_web/models/best.onnx
+models/best.onnx
 ```
 
-## 3. Test on your computer
+The current JavaScript expects:
+
+- Model input size: 320 × 320
+- One class: `hackysack`
+- Standard Ultralytics YOLOv8 ONNX output
+
+## Test locally
 
 ```bash
-cd hackysack_web
 python -m http.server 8000
 ```
 
@@ -29,18 +28,9 @@ Open:
 http://localhost:8000
 ```
 
-## 4. Publish with GitHub Pages
+## GitHub Pages
 
-1. Create a GitHub repository.
-2. Upload every file inside `hackysack_web`.
-3. Open repository Settings.
-4. Open Pages.
-5. Choose Deploy from a branch.
-6. Choose `main` and `/ (root)`.
-7. Open the HTTPS Pages address in Safari.
-8. Press Start camera and allow camera access.
+Upload the contents of this folder to your repository root, enable GitHub Pages,
+then open the HTTPS Pages URL directly in Safari.
 
-Notes:
-- The website expects `best.onnx` exported at 320 x 320.
-- It expects one class named `hackysack`.
-- The touch counter is a basic movement estimate; the detector boxes are more reliable.
+Camera access requires HTTPS on the phone.

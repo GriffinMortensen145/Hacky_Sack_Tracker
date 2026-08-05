@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+  >
   <meta name="theme-color" content="#080b10">
   <title>Hacky Sack Detector</title>
   <link rel="stylesheet" href="style.css">
@@ -13,8 +16,14 @@
     <video id="camera" autoplay muted playsinline></video>
 
     <section id="topBar">
-      <div class="pill"><span id="statusDot"></span><span id="status">Press Start</span></div>
-      <div class="pill"><span id="fps">0.0 FPS</span></div>
+      <div class="pill">
+        <span id="statusDot"></span>
+        <span id="status">Press Start</span>
+      </div>
+
+      <div class="pill">
+        <span id="fps">0.0 FPS</span>
+      </div>
     </section>
 
     <section id="counterPanel">
@@ -27,7 +36,16 @@
         <span>Confidence</span>
         <span id="confidenceValue">35%</span>
       </label>
-      <input id="confidence" type="range" min="10" max="90" value="35" step="1">
+
+      <input
+        id="confidence"
+        type="range"
+        min="10"
+        max="90"
+        value="35"
+        step="1"
+      >
+
       <div class="buttonRow">
         <button id="startButton" class="primary">Start camera</button>
         <button id="resetButton">Reset count</button>
@@ -39,7 +57,7 @@
 
   <canvas id="modelCanvas" width="320" height="320"></canvas>
 
-  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
-  <script src="app.js?v=43"></script>
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js"></script>
+  <script src="app.js?v=1"></script>
 </body>
 </html>
